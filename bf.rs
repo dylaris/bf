@@ -55,7 +55,14 @@ fn run(codes: &[char]) -> std::io::Result<()> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string("test/helloworld.bf")?;
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <bf-file>", args[0]);
+        std::process::exit(1);
+    }
+
+    let filename = &args[1];
+    let content = std::fs::read_to_string(filename)?;
     let codes: Vec<char> = content.chars().collect();
     run(&codes)?;
     Ok(())
