@@ -6,7 +6,7 @@ The interpreter of brainf*ck.
 
 ```console
 $ rustc bf.rs
-$ ./bf test/helloworld.bf
+$ ./bf examples/helloworld.bf
 ```
 
 ## Syntax
