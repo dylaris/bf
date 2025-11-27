@@ -1,0 +1,389 @@
+use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
+
+// Brainfuck    C
+//     >      ++ptr
+//     <      --ptr
+//     +      ++*ptr
+//     -      --*ptr
+//     .      fputc(*ptr, stdout);
+//     ,      *ptr = fgetc(stdin);
+//     [      while(*ptr) {
+//     ]      }
+
+enum OpType {
+    OpShl = '<' as isize,
+    OpShr = '>' as isize,
+    OpInc = '+' as isize,
+    OpDec = '-' as isize,
+    OpOut = '.' as isize,
+    OpIn  = ',' as isize,
+    OpJz  = '[' as isize,
+    OpJnz = ']' as isize
+}
+
+impl OpType {
+    fn to_string(&self) -> String {
+        match self {
+            OpType::OpShl => String::from("OP_SHL"),
+            OpType::OpShr => String::from("OP_SHR"),
+            OpType::OpInc => String::from("OP_INC"),
+            OpType::OpDec => String::from("OP_DEC"),
+            OpType::OpOut => String::from("OP_OUT"),
+            OpType::OpIn  => String::from("OP_IN"),
+            OpType::OpJz  => String::from("OP_JZ"),
+            OpType::OpJnz => String::from("OP_JNZ"),
+       }
+    }
+
+    fn from_char(ch: char) -> Option<Self> {
+        match ch {
+            '<' => Some(OpType::OpShl),
+            '>' => Some(OpType::OpShr),
+            '+' => Some(OpType::OpInc),
+            '-' => Some(OpType::OpDec),
+            '.' => Some(OpType::OpOut),
+            ',' => Some(OpType::OpIn),
+            '[' => Some(OpType::OpJz),
+            ']' => Some(OpType::OpJnz),
+             _  => None
+        }
+    }
+}
+
+struct Instruction {
+    // meaning of operand for each instruction
+    // for OpJz/OpJnz, it means the jump address
+    // for others, it means repeat times
+    opcode: OpType,
+    operand: usize
+}
+
+impl std::fmt::Display for Instruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}\t{}", self.opcode.to_string(), self.operand)
+    }
+}
+
+struct BfVm {
+    stack: Vec<usize>,       // address stack
+    insts: Vec<Instruction>, // instruction set
+    dp: usize,               // data pointer
+    pc: usize,               // program counter
+    memory: Vec<u8>,
+}
+
+impl Default for BfVm {
+    fn default() -> Self {
+        Self {
+            stack: Vec::new(),
+            insts: Vec::new(),
+            dp: 0,
+            pc: 0,
+            memory: vec![0; 30000]
+        }
+    }
+}
+
+fn read_char() -> std::io::Result<char> {
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    match input.trim().chars().next() {
+        Some(ch) => Ok(ch),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "No input"
+        )),
+    }
+}
+
+fn generate_ir(codes: &Vec<char>, vm: &mut BfVm) {
+    let mut ptr = 0;
+
+    while ptr < codes.len() {
+        let ch = codes[ptr];
+        match ch {
+            '<' | '>' | '+' | '-' | '.' | ',' => {
+                ptr += 1;
+                let mut count: usize = 1;
+                while ptr < codes.len() && ch == codes[ptr] {
+                    count += 1;
+                    ptr += 1;
+                }
+                let inst = Instruction {
+                    opcode: OpType::from_char(ch).expect("invalid opcode"),
+                    operand: count,
+                };
+                vm.insts.push(inst);
+            },
+            '[' => {
+                ptr += 1;
+                let loop_start_addr = vm.insts.len(); // record the address of current instruction '['
+                let inst = Instruction {
+                    opcode: OpType::from_char(ch).expect("invalid opcode"),
+                    operand: 0, // backpatching when we match the closed paren
+                };
+                vm.stack.push(loop_start_addr);
+                vm.insts.push(inst);
+            },
+            ']' => {
+                ptr += 1;
+                let loop_start_addr = vm.stack.pop().expect("stack underflow");
+                let inst = Instruction {
+                    opcode: OpType::from_char(ch).expect("invalid opcode"),
+                    operand: loop_start_addr + 1, // skip instruction OpJz
+                };
+                vm.insts.push(inst);
+                let loop_end_addr = vm.insts.len();
+                vm.insts[loop_start_addr].operand = loop_end_addr;
+            },
+             _  => ptr += 1,
+        }
+    }
+
+    if !vm.stack.is_empty() {
+        panic!("unbalanced paren");
+    }
+}
+
+fn interpret(vm: &mut BfVm) -> std::io::Result<()> {
+    while vm.pc < vm.insts.len() {
+        let inst = &vm.insts[vm.pc];
+        match inst.opcode {
+            OpType::OpShl => {
+                if vm.dp < inst.operand {
+                    panic!("data pointer undeflow");
+                }
+                vm.dp -= inst.operand;
+                vm.pc += 1;
+            },
+            OpType::OpShr => {
+                if vm.dp + inst.operand >= vm.memory.len() {
+                    panic!("data pointer overflow");
+                }
+                vm.dp += inst.operand;
+                vm.pc += 1;
+            },
+            OpType::OpInc => {
+                vm.memory[vm.dp] = vm.memory[vm.dp].wrapping_add(inst.operand as u8);
+                vm.pc += 1;
+            },
+            OpType::OpDec => {
+                vm.memory[vm.dp] = vm.memory[vm.dp].wrapping_sub(inst.operand as u8);
+                vm.pc += 1;
+            },
+            OpType::OpOut => {
+                for _ in 0..inst.operand {
+                    print!("{}", vm.memory[vm.dp] as char);
+                }
+                vm.pc += 1;
+            },
+            OpType::OpIn  => {
+                for _ in 0..inst.operand {
+                    vm.memory[vm.dp] = read_char()? as u8;
+                }
+                vm.pc += 1;
+            },
+            OpType::OpJz  => {
+                if vm.memory[vm.dp] == 0 {
+                    vm.pc = inst.operand;
+                } else {
+                    vm.pc += 1;
+                }
+            },
+            OpType::OpJnz => {
+                if vm.memory[vm.dp] != 0 {
+                    vm.pc = inst.operand;
+                } else {
+                    vm.pc += 1;
+                }
+            },
+        }
+    }
+
+    Ok(())
+}
+
+fn compile_jit(vm: &mut BfVm) {
+    let mut ops = dynasmrt::x64::Assembler::new().unwrap();
+
+    let mem_base = vm.memory.as_ptr() as i64;
+    let mem_size = vm.memory.len() as i64;
+
+    let mut buffer = vec!['\0'; 512];
+    let buf_base = buffer.as_ptr() as i64;
+
+    let run_jit = ops.offset();
+
+    // store the context
+    dynasm!(ops
+        ; .arch x64
+        ; push rax
+        ; push rdi
+        ; push rsi
+        ; push rdx
+        ; push r12
+        ; push r13
+        ; push r14
+        ; mov r12, 0 // dp
+        ; mov r13, 0 // pc
+        ; mov r14, QWORD mem_base as _
+    );
+
+    dynasm!(ops
+        ; .arch x64
+        ; ->panic:
+        ; ud2
+    );
+
+    for inst in &vm.insts {
+        match inst.opcode {
+            OpType::OpShl => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, QWORD inst.operand as _
+                    ; sub r12, rcx
+                    ; cmp r12, 0
+                    ; jl ->panic
+                    ; add r13, 1
+                );
+            },
+            OpType::OpShr => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, QWORD inst.operand as _
+                    ; add r12, rcx
+                    ; mov rcx, QWORD mem_size as _
+                    ; sub r12, rcx
+                    ; jge ->panic
+                    ; mov rcx, QWORD mem_size as _
+                    ; add r12, rcx
+                    ; add r13, 1
+                );
+            },
+            OpType::OpInc => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; add BYTE [r14 + r12], BYTE inst.operand as _
+                    ; add r13, 1
+                );
+            },
+            OpType::OpDec => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; sub BYTE [r14 + r12], BYTE inst.operand as _
+                    ; add r13, 1
+                );
+            },
+            OpType::OpOut => {
+                for _ in 0..inst.operand {
+                    buffer.push(vm.memory[vm.dp] as char);
+                }
+                // write(fd, buf, count)
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rax, 1
+                    ; mov rdi, 1
+                    ; mov rsi, QWORD buf_base as _
+                    ; mov rdx, QWORD inst.operand as _
+                    ; syscall
+                    ; add r13, 1
+                );
+            },
+            OpType::OpIn  => {
+                for _ in 0..inst.operand {
+                    // read(fd, buf, count)
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rax, 0
+                        ; mov rdi, 0
+                        ; lea rsi, [r12 + r14]
+                        ; mov rdx, 1
+                        ; syscall
+                        ; add r13, 1
+                    );
+                }
+            },
+            OpType::OpJz  => {
+                let jump_label = ops.new_dynamic_label();
+                let end_label = ops.new_dynamic_label();
+
+                dynasm!(ops
+                    ; .arch x64
+                    ; cmp BYTE [r12 + r14], 0
+                    ; je =>jump_label
+                    ; add r13, 1
+                    ; jmp =>end_label
+                    ; =>jump_label
+                    ; mov r13, QWORD inst.operand as _
+                    ; =>end_label
+                );
+            },
+            OpType::OpJnz => {
+                let jump_label = ops.new_dynamic_label();
+                let end_label = ops.new_dynamic_label();
+
+                dynasm!(ops
+                    ; .arch x64
+                    ; cmp BYTE [r12 + r14], 0
+                    ; jne =>jump_label
+                    ; add r13, 1
+                    ; jmp =>end_label
+                    ; =>jump_label
+                    ; mov r13, QWORD inst.operand as _
+                    ; =>end_label
+                );
+            },
+        }
+    }
+
+    // restore the context
+    dynasm!(ops
+        ; .arch x64
+        ; pop r14
+        ; pop r13
+        ; pop r12
+        ; pop rdx
+        ; pop rsi
+        ; pop rdi
+        ; pop rax
+        ; ret
+    );
+
+    let jit_buf = ops.finalize().unwrap();
+    let run_jit_fn: extern "sysv64" fn() -> bool = unsafe { std::mem::transmute(jit_buf.ptr(run_jit)) };
+    run_jit_fn();
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} [--jit] <bf-file>", args[0]);
+        std::process::exit(1);
+    }
+
+    let (use_jit, filename) = if args[1] == "--jit" {
+        if args.len() < 3 {
+            eprintln!("Usage: {} [--jit] <bf-file>", args[0]);
+            std::process::exit(1);
+        }
+        (true, &args[2])
+    } else {
+        (false, &args[1])
+    };
+
+    let content = std::fs::read_to_string(filename)?;
+    let codes: Vec<char> = content.chars().collect();
+    let mut vm = BfVm::default();
+
+    generate_ir(&codes, &mut vm);
+
+    if use_jit {
+        println!("Using JIT compilation...");
+        compile_jit(&mut vm)?;
+    } else {
+        println!("Using interpreter...");
+        interpret(&mut vm)?;
+    }
+
+    Ok(())
+}

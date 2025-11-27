@@ -5,8 +5,8 @@ The interpreter of brainf*ck.
 ## Usage
 
 ```console
-$ rustc bf.rs
-$ ./bf examples/helloworld.bf
+$ cargo build
+$ ./target/debug/bf examples/helloworld.bf
 ```
 
 ## Syntax
