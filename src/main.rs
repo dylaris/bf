@@ -1,5 +1,3 @@
-use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
-
 // Brainfuck    C
 //     >      ++ptr
 //     <      --ptr
@@ -203,187 +201,25 @@ fn interpret(vm: &mut BfVm) -> std::io::Result<()> {
     Ok(())
 }
 
-fn compile_jit(vm: &mut BfVm) {
-    let mut ops = dynasmrt::x64::Assembler::new().unwrap();
-
-    let mem_base = vm.memory.as_ptr() as i64;
-    let mem_size = vm.memory.len() as i64;
-
-    let mut buffer = vec!['\0'; 512];
-    let buf_base = buffer.as_ptr() as i64;
-
-    let run_jit = ops.offset();
-
-    // store the context
-    dynasm!(ops
-        ; .arch x64
-        ; push rax
-        ; push rdi
-        ; push rsi
-        ; push rdx
-        ; push r12
-        ; push r13
-        ; push r14
-        ; mov r12, 0 // dp
-        ; mov r13, 0 // pc
-        ; mov r14, QWORD mem_base as _
-    );
-
-    dynasm!(ops
-        ; .arch x64
-        ; ->panic:
-        ; ud2
-    );
-
-    for inst in &vm.insts {
-        match inst.opcode {
-            OpType::OpShl => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, QWORD inst.operand as _
-                    ; sub r12, rcx
-                    ; cmp r12, 0
-                    ; jl ->panic
-                    ; add r13, 1
-                );
-            },
-            OpType::OpShr => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, QWORD inst.operand as _
-                    ; add r12, rcx
-                    ; mov rcx, QWORD mem_size as _
-                    ; sub r12, rcx
-                    ; jge ->panic
-                    ; mov rcx, QWORD mem_size as _
-                    ; add r12, rcx
-                    ; add r13, 1
-                );
-            },
-            OpType::OpInc => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; add BYTE [r14 + r12], BYTE inst.operand as _
-                    ; add r13, 1
-                );
-            },
-            OpType::OpDec => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; sub BYTE [r14 + r12], BYTE inst.operand as _
-                    ; add r13, 1
-                );
-            },
-            OpType::OpOut => {
-                for _ in 0..inst.operand {
-                    buffer.push(vm.memory[vm.dp] as char);
-                }
-                // write(fd, buf, count)
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rax, 1
-                    ; mov rdi, 1
-                    ; mov rsi, QWORD buf_base as _
-                    ; mov rdx, QWORD inst.operand as _
-                    ; syscall
-                    ; add r13, 1
-                );
-            },
-            OpType::OpIn  => {
-                for _ in 0..inst.operand {
-                    // read(fd, buf, count)
-                    dynasm!(ops
-                        ; .arch x64
-                        ; mov rax, 0
-                        ; mov rdi, 0
-                        ; lea rsi, [r12 + r14]
-                        ; mov rdx, 1
-                        ; syscall
-                        ; add r13, 1
-                    );
-                }
-            },
-            OpType::OpJz  => {
-                let jump_label = ops.new_dynamic_label();
-                let end_label = ops.new_dynamic_label();
-
-                dynasm!(ops
-                    ; .arch x64
-                    ; cmp BYTE [r12 + r14], 0
-                    ; je =>jump_label
-                    ; add r13, 1
-                    ; jmp =>end_label
-                    ; =>jump_label
-                    ; mov r13, QWORD inst.operand as _
-                    ; =>end_label
-                );
-            },
-            OpType::OpJnz => {
-                let jump_label = ops.new_dynamic_label();
-                let end_label = ops.new_dynamic_label();
-
-                dynasm!(ops
-                    ; .arch x64
-                    ; cmp BYTE [r12 + r14], 0
-                    ; jne =>jump_label
-                    ; add r13, 1
-                    ; jmp =>end_label
-                    ; =>jump_label
-                    ; mov r13, QWORD inst.operand as _
-                    ; =>end_label
-                );
-            },
-        }
-    }
-
-    // restore the context
-    dynasm!(ops
-        ; .arch x64
-        ; pop r14
-        ; pop r13
-        ; pop r12
-        ; pop rdx
-        ; pop rsi
-        ; pop rdi
-        ; pop rax
-        ; ret
-    );
-
-    let jit_buf = ops.finalize().unwrap();
-    let run_jit_fn: extern "sysv64" fn() -> bool = unsafe { std::mem::transmute(jit_buf.ptr(run_jit)) };
-    run_jit_fn();
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} [--jit] <bf-file>", args[0]);
+        eprintln!("Usage: {} <bf-file>", args[0]);
         std::process::exit(1);
     }
 
-    let (use_jit, filename) = if args[1] == "--jit" {
-        if args.len() < 3 {
-            eprintln!("Usage: {} [--jit] <bf-file>", args[0]);
-            std::process::exit(1);
-        }
-        (true, &args[2])
-    } else {
-        (false, &args[1])
-    };
-
+    let filename = &args[1];
     let content = std::fs::read_to_string(filename)?;
     let codes: Vec<char> = content.chars().collect();
     let mut vm = BfVm::default();
 
     generate_ir(&codes, &mut vm);
 
-    if use_jit {
-        println!("Using JIT compilation...");
-        compile_jit(&mut vm)?;
-    } else {
-        println!("Using interpreter...");
-        interpret(&mut vm)?;
-    }
+    // for inst in &vm.insts {
+    //     println!("{}", inst);
+    // }
+
+    interpret(&mut vm)?;
 
     Ok(())
 }

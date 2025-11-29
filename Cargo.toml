@@ -2,7 +2,3 @@
 name = "bf"
 version = "0.1.0"
 edition = "2024"
-
-[dependencies]
-dynasm = "4.0.1"
-dynasmrt = "4.0.1"
